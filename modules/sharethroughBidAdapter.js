@@ -13,56 +13,81 @@ const STR_ENDPOINT = `https://btlr.sharethrough.com/universal/v1?supply_id=${SUP
 
 // --- Begin Contxtful Receptivity Integration ---
 
-// 1. Declare constants, and variables holding the receptivity values
-const CONTXTFUL_MODULE_CODE = 'contxtful';
-let initialReceptivity;
-let contxtfulApi;
+const customer = 'YOUR_CUSTOMER_ID'; // TODO: Replace this value with your own customer ID
 
-/**
- * 2. Define the function calling the Contxtful API to inject the Javascript connector in page.
- */
-function initReceptivity() {
-  const CONTXTFUL_CONNECTOR_HOSTNAME = 'api.receptivity.io';
-  const version = 'v1';
-  const customer = 'USE_YOUR_CUSTOMER_KEY'; // TODO: Replace this value with your own customer ID
-  const connectorServerUrl = `https://${CONTXTFUL_CONNECTOR_HOSTNAME}/${version}/prebid/${customer}/connector/p.js`;
-  const loaderScript = loadExternalScript(
-    connectorServerUrl,
-    CONTXTFUL_MODULE_CODE
-  );
-  addRxEventListeners(loaderScript);
-}
+function ReceptivityApi(tagId) {
+  // Declare constants, and variables holding the receptivity values
+  const CONNECTOR_URL = `https://api.receptivity.io/v1/ssp/${tagId}/connector/rxConnector.js`;
+  const CONTXTFUL_MODULE_CODE = 'contxtful';
 
-/**
- * 3. Function to register event listeners on the receptivity connector
- * @param {*} loaderScript The externally loaded script object.
- */
-function addRxEventListeners(loaderScript) {
-  loaderScript.addEventListener(
-    'initialReceptivity',
-    ({ detail: receptivity }) => {
-      initialReceptivity = receptivity.ReceptivityState;
+  let connectorApi = null;
+  let initialReceptivity = loadSessionReceptivity(tagId);
+
+  // Retrieves the receptivity value from the session storage
+  function loadSessionReceptivity(tagId) {
+    let sessionStorageValue = sessionStorage.getItem(tagId);
+    if (!sessionStorageValue) return null;
+
+    try {
+      // Check expiration of the cached value
+      let sessionStorageReceptivity = JSON.parse(sessionStorageValue);
+      let expiration = parseInt(sessionStorageReceptivity?.exp);
+      if (expiration < new Date().getTime()) {
+        return null;
+      }
+
+      return sessionStorageReceptivity?.rx;
+    } catch {}
+  }
+
+  // Make a network request to load the connector's JavaScript file
+  function initConnector(tagId) {
+    const loaderScript = loadExternalScript(
+      CONNECTOR_URL,
+      CONTXTFUL_MODULE_CODE
+    );
+
+    addRxEventListeners(loaderScript, tagId);
+  }
+
+  // Register for events to manage the connector flow
+  function addRxEventListeners(loaderScript, tagId) {
+    loaderScript.addEventListener(
+      'rxConnectorIsReady',
+      async ({ detail: rxConnector }) => {
+        // Fetch the customer configuration
+        const { rxApiBuilder, fetchConfig } = rxConnector;
+        let config = await fetchConfig(tagId);
+        if (!config) {
+          return;
+        }
+        connectorApi = await rxApiBuilder(config);
+      }
+    );
+  }
+
+  // This function is a placeholder for future server-side receptivity computation.
+  function getParams() {
+    return null;
+  };
+
+  // Initialize the connector
+  initConnector(tagId);
+
+  // Returns the best available receptivity value
+  return {
+    getReceptivity: function() {
+      let rx = connectorApi?.receptivity()?.toJSON() || initialReceptivity;
+      let params = getParams();
+
+      return { rx, params };
     }
-  );
-  loaderScript.addEventListener('rxEngineIsReady', ({ detail: api }) => {
-    contxtfulApi = api;
-  });
+  };
 }
 
-/**
- * 4. Define the function to retrieve the best available receptivity value
- */
-function getReceptivity() {
-  let isConnectorReady = !!contxtfulApi?.GetReceptivity();
+// Call the Contxtful API to inject the Javascript connector in page
+const receptivityApi = ReceptivityApi(customer);
 
-  return isConnectorReady
-    ? contxtfulApi.GetReceptivity().ReceptivityState
-    : initialReceptivity;
-}
-
-// 5. Call the Contxtful API to retrieve the receptivity value
-// NOTE: a feature flag could also be used e.g. bidderSettings.get(BIDDER_CODE, 'allowReceptivity');
-initReceptivity();
 // --- End Contxtful Receptivity Integration ---
 
 // this allows stubbing of utility function that is used internally by the sharethrough adapter
@@ -114,18 +139,11 @@ export const sharethroughAdapterSpec = {
           schain: bidRequests[0].schain,
         },
       },
-      // --- Begin Contxtful Receptivity Integration ---
-      // 6. Insert the receptivity value into the global first party data object
       user: {
-        ext: {
-          data: {
-            receptivity: getReceptivity(),
-          },
-        },
+        ext: {},
         ...firstPartyData.user,
       },
 
-      // --- End Contxtful Receptivity Integration ---
       bcat: deepAccess(bidderRequest.ortb2, 'bcat') || bidRequests[0].params.bcat || [],
       badv: deepAccess(bidderRequest.ortb2, 'badv') || bidRequests[0].params.badv || [],
       test: 0,
@@ -133,6 +151,12 @@ export const sharethroughAdapterSpec = {
 
     req.user = nullish(firstPartyData.user, {});
     if (!req.user.ext) req.user.ext = {};
+
+    // --- Begin Contxtful Receptivity Integration ---
+    // Inserts the receptivity value into the first party data object
+    req.user.ext.receptivity = receptivityApi.getReceptivity();
+    // --- End Contxtful Receptivity Integration ---
+
     req.user.ext.eids = bidRequests[0].userIdAsEids || [];
 
     if (bidderRequest.gdprConsent) {
