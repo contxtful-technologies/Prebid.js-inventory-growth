@@ -28,7 +28,6 @@ const _approvedLoadExternalJSList = [
   'a1Media',
   'geoedge',
   'qortex',
-  // Allow the Contxtful module to load its connector
   'contxtful'
 ]
 
